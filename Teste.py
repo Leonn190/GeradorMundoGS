@@ -6,7 +6,7 @@ from pathlib import Path
 from Estrutura import (
     BLOCK_SIZE,
     CHUNK_SIZE,
-    HEIGHT_COLORS,
+    BLOCK_COLORS,
     WORLD_HEIGHT,
     WORLD_WIDTH,
     GeradorMundo,
@@ -53,8 +53,8 @@ def main() -> None:
             mapa_surface = pygame.Surface((WORLD_WIDTH, WORLD_HEIGHT))
             for world_y in range(WORLD_HEIGHT):
                 for world_x in range(WORLD_WIDTH):
-                    h = gerador.get_height(world_x, world_y)
-                    mapa_surface.set_at((world_x, world_y), HEIGHT_COLORS[h])
+                    bloco = gerador.get_block(world_x, world_y)
+                    mapa_surface.set_at((world_x, world_y), BLOCK_COLORS[bloco])
 
             pasta_saida = Path("fotos_mapa")
             pasta_saida.mkdir(exist_ok=True)
@@ -151,9 +151,8 @@ def main() -> None:
                 local_x = wrapped_x % CHUNK_SIZE
                 local_y = wrapped_y % CHUNK_SIZE
 
-                chunk = gerador.get_chunk(chunk_x, chunk_y)
-                h = chunk[local_y][local_x]
-                color = HEIGHT_COLORS[h]
+                bloco = gerador.get_block_chunk(chunk_x, chunk_y)[local_y][local_x]
+                color = BLOCK_COLORS[bloco]
 
                 pygame.draw.rect(screen, color, (draw_x, draw_y, current_block_size, current_block_size))
 
