@@ -12,7 +12,10 @@ from Estrutura import (
 
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
-FPS = 60
+FPS = 180
+MIN_BLOCK_SIZE = 8
+MAX_BLOCK_SIZE = 56
+ZOOM_STEP = 4
 
 
 def wrap_world(value: float, max_value: int) -> float:
@@ -32,6 +35,7 @@ def main() -> None:
     cam_x = 0.0
     cam_y = 0.0
     velocidade = 6.0  # blocos por segundo
+    block_size = float(BLOCK_SIZE)
 
     running = True
     while running:
@@ -42,11 +46,11 @@ def main() -> None:
                 running = False
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                # esquerdo: aumenta; direito: diminui
-                if event.button == 1:
-                    velocidade = min(120.0, velocidade + 1.0)
-                elif event.button == 3:
-                    velocidade = max(1.0, velocidade - 1.0)
+                # roda do mouse controla zoom
+                if event.button == 4:
+                    block_size = min(MAX_BLOCK_SIZE, block_size + ZOOM_STEP)
+                elif event.button == 5:
+                    block_size = max(MIN_BLOCK_SIZE, block_size - ZOOM_STEP)
 
         keys = pygame.key.get_pressed()
         dx = 0.0
@@ -65,6 +69,15 @@ def main() -> None:
             dx *= 0.7071
             dy *= 0.7071
 
+        if keys[pygame.K_q]:
+            block_size = max(MIN_BLOCK_SIZE, block_size - ZOOM_STEP * dt * 12)
+        if keys[pygame.K_e]:
+            block_size = min(MAX_BLOCK_SIZE, block_size + ZOOM_STEP * dt * 12)
+        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+            velocidade = min(160.0, velocidade + 30.0 * dt)
+        if keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL]:
+            velocidade = max(1.0, velocidade - 30.0 * dt)
+
         cam_x += dx * velocidade * dt
         cam_y += dy * velocidade * dt
 
@@ -74,23 +87,25 @@ def main() -> None:
         screen.fill((0, 0, 0))
 
         # faixa visível de blocos
-        blocks_x = SCREEN_WIDTH // BLOCK_SIZE + 3
-        blocks_y = SCREEN_HEIGHT // BLOCK_SIZE + 3
+        current_block_size = max(MIN_BLOCK_SIZE, min(MAX_BLOCK_SIZE, int(round(block_size))))
+
+        blocks_x = SCREEN_WIDTH // current_block_size + 3
+        blocks_y = SCREEN_HEIGHT // current_block_size + 3
 
         start_block_x = int(cam_x) - blocks_x // 2
         start_block_y = int(cam_y) - blocks_y // 2
 
-        offset_x = -((cam_x - int(cam_x)) * BLOCK_SIZE)
-        offset_y = -((cam_y - int(cam_y)) * BLOCK_SIZE)
+        offset_x = -((cam_x - int(cam_x)) * current_block_size)
+        offset_y = -((cam_y - int(cam_y)) * current_block_size)
 
         # desenha por chunks, lendo somente os chunks necessários
         for by in range(blocks_y):
             world_y = start_block_y + by
-            draw_y = int(by * BLOCK_SIZE + offset_y)
+            draw_y = int(by * current_block_size + offset_y)
 
             for bx in range(blocks_x):
                 world_x = start_block_x + bx
-                draw_x = int(bx * BLOCK_SIZE + offset_x)
+                draw_x = int(bx * current_block_size + offset_x)
 
                 wrapped_x = world_x % WORLD_WIDTH
                 wrapped_y = world_y % WORLD_HEIGHT
@@ -104,9 +119,13 @@ def main() -> None:
                 h = chunk[local_y][local_x]
                 color = HEIGHT_COLORS[h]
 
-                pygame.draw.rect(screen, color, (draw_x, draw_y, BLOCK_SIZE, BLOCK_SIZE))
+                pygame.draw.rect(screen, color, (draw_x, draw_y, current_block_size, current_block_size))
 
-        info = f"Bloco: ({int(cam_x)}, {int(cam_y)}) | Velocidade: {velocidade:.1f} blocos/s"
+        fps_real = clock.get_fps()
+        info = (
+            f"Bloco: ({int(cam_x)}, {int(cam_y)}) | Vel: {velocidade:.1f} blocos/s | "
+            f"Zoom: {current_block_size}px | FPS: {fps_real:5.1f}/{FPS}"
+        )
         text = font.render(info, True, (255, 255, 255))
         text_rect = text.get_rect(topright=(SCREEN_WIDTH - 16, 12))
 

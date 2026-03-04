@@ -7,7 +7,7 @@ WORLD_HEIGHT = 2048
 
 # Estrutura de chunks
 CHUNK_SIZE = 32  # blocos por chunk
-BLOCK_SIZE = 64  # pixels por bloco
+BLOCK_SIZE = 32  # pixels por bloco (zoom padrão)
 
 # Cores base por altura
 HEIGHT_COLORS = {
@@ -94,7 +94,12 @@ class GeradorMundo:
 
     def _height_value(self, world_x: int, world_y: int) -> int:
         """
-        Calcula altura discreta [0..3] com tendência continental + detalhes costeiros.
+        Calcula altura discreta [0..3] com tendência continental + hidrologia leve.
+
+        Objetivo visual:
+        - maior parte do mapa em oceano (0) e solo (3)
+        - água rasa (1) e praia (2) apenas como transições finas
+        - presença de lagos e rios rasos
         """
         lx = self._loop_x(world_x)
         ly = self._loop_y(world_y)
@@ -119,14 +124,29 @@ class GeradorMundo:
             + math.cos((ny * 1.6 - continent * 0.7) * math.tau)
         ) * 0.08
 
-        v = 0.62 * continent + 0.3 * coast_detail + wave
+        v = 0.70 * continent + 0.23 * coast_detail + wave
 
-        # thresholds: favorecem oceanos + continente com praias/águas rasas
-        if v < 0.42:
+        # rios: máscara estreita baseada em "faixas" de ruido
+        # abs(noise - 0.5) pequeno => no canal do rio
+        river_noise = self._fbm(nx * 42.0 + 11.7, ny * 42.0 - 3.1, octaves=3, lacunarity=2.1, gain=0.52)
+        river_band = abs(river_noise - 0.5)
+        river_strength = max(0.0, 1.0 - (river_band / 0.022))
+
+        # lagos: bacias esparsas em área continental
+        lake_noise = self._fbm(nx * 8.5 - 19.4, ny * 8.5 + 7.9, octaves=4, lacunarity=2.0, gain=0.5)
+        lake_strength = max(0.0, (0.42 - lake_noise) / 0.08)
+
+        # rios e lagos atuam principalmente sobre terreno emergido
+        land_factor = max(0.0, min(1.0, (v - 0.53) / 0.16))
+        water_cut = 0.19 * river_strength * land_factor + 0.13 * lake_strength * land_factor
+        v -= water_cut
+
+        # thresholds: transições (1 e 2) mais finas
+        if v < 0.49:
             return 0
-        if v < 0.5:
+        if v < 0.515:
             return 1
-        if v < 0.57:
+        if v < 0.535:
             return 2
         return 3
 
