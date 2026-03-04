@@ -1,5 +1,6 @@
 import pygame
 import threading
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ def main() -> None:
     font = pygame.font.SysFont("consolas", 24)
 
     gerador = GeradorMundo(seed=202604)
+    fallback_chunk = [[2 for _ in range(CHUNK_SIZE)] for _ in range(CHUNK_SIZE)]
 
     # câmera começa no bloco (0,0)
     cam_x = 0.0
@@ -134,7 +136,8 @@ def main() -> None:
         offset_x = -((cam_x - int(cam_x)) * current_block_size)
         offset_y = -((cam_y - int(cam_y)) * current_block_size)
 
-        # desenha por chunks, lendo somente os chunks necessários
+        chunks_visiveis: dict[tuple[int, int], list[tuple[int, int, int, int]]] = defaultdict(list)
+
         for by in range(blocks_y):
             world_y = start_block_y + by
             draw_y = int(by * current_block_size + offset_y)
@@ -151,7 +154,20 @@ def main() -> None:
                 local_x = wrapped_x % CHUNK_SIZE
                 local_y = wrapped_y % CHUNK_SIZE
 
-                bloco = gerador.get_block_chunk(chunk_x, chunk_y)[local_y][local_x]
+                chunks_visiveis[(chunk_x, chunk_y)].append((local_x, local_y, draw_x, draw_y))
+
+        # pré-carrega chunks próximos em thread para reduzir travadas
+        for chunk_x, chunk_y in chunks_visiveis.keys():
+            gerador.request_block_chunk(chunk_x, chunk_y)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    gerador.request_block_chunk(chunk_x + dx, chunk_y + dy)
+
+        # desenha com o que já estiver pronto sem bloquear o frame
+        for (chunk_x, chunk_y), blocos in chunks_visiveis.items():
+            chunk_data = gerador.try_get_block_chunk(chunk_x, chunk_y) or fallback_chunk
+            for local_x, local_y, draw_x, draw_y in blocos:
+                bloco = chunk_data[local_y][local_x]
                 color = BLOCK_COLORS[bloco]
 
                 pygame.draw.rect(screen, color, (draw_x, draw_y, current_block_size, current_block_size))
@@ -162,7 +178,8 @@ def main() -> None:
             status_foto = foto_status
         info = (
             f"Modo: {modo} (M salva foto do mapa) | Bloco: ({int(cam_x)}, {int(cam_y)}) | "
-            f"Vel: {velocidade:.1f} blocos/s | Zoom: {current_block_size}px | FPS: {fps_real:5.1f}/{FPS}"
+            f"Vel: {velocidade:.1f} blocos/s | Zoom: {current_block_size}px | FPS: {fps_real:5.1f}/{FPS} | "
+            f"Chunks pendentes: {gerador.pending_chunk_count()}"
         )
         if status_foto:
             info = f"{info} | {status_foto}"
