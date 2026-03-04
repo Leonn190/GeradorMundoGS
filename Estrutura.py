@@ -2,8 +2,9 @@ import math
 from dataclasses import dataclass
 
 # Tamanho lógico do mundo em blocos (mundo em loop/toroidal)
-WORLD_WIDTH = 2048
-WORLD_HEIGHT = 2048
+# +25% em relação ao tamanho anterior (2048)
+WORLD_WIDTH = 2560
+WORLD_HEIGHT = 2560
 
 # Estrutura de chunks
 CHUNK_SIZE = 32  # blocos por chunk
@@ -126,11 +127,12 @@ class GeradorMundo:
 
         v = 0.70 * continent + 0.23 * coast_detail + wave
 
-        # rios: máscara estreita baseada em "faixas" de ruido
+        # rios: máscara baseada em "faixas" de ruído
         # abs(noise - 0.5) pequeno => no canal do rio
         river_noise = self._fbm(nx * 42.0 + 11.7, ny * 42.0 - 3.1, octaves=3, lacunarity=2.1, gain=0.52)
         river_band = abs(river_noise - 0.5)
-        river_strength = max(0.0, 1.0 - (river_band / 0.022))
+        # faixa mais larga para rios mais grossos visualmente
+        river_strength = max(0.0, 1.0 - (river_band / 0.042))
 
         # lagos: bacias esparsas em área continental
         lake_noise = self._fbm(nx * 8.5 - 19.4, ny * 8.5 + 7.9, octaves=4, lacunarity=2.0, gain=0.5)
@@ -138,7 +140,15 @@ class GeradorMundo:
 
         # rios e lagos atuam principalmente sobre terreno emergido
         land_factor = max(0.0, min(1.0, (v - 0.53) / 0.16))
-        water_cut = 0.19 * river_strength * land_factor + 0.13 * lake_strength * land_factor
+        water_cut = 0.25 * river_strength * land_factor + 0.13 * lake_strength * land_factor
+
+        # borda oceânica: força oceano puro nas extremidades de forma suave,
+        # evitando costura aparente quando o mundo "dá a volta".
+        edge_dist = min(nx, 1.0 - nx, ny, 1.0 - ny)
+        coast_band = 0.12
+        edge_factor = max(0.0, min(1.0, (coast_band - edge_dist) / coast_band))
+        edge_factor = edge_factor * edge_factor * (3.0 - 2.0 * edge_factor)
+        water_cut += 0.42 * edge_factor
         v -= water_cut
 
         # thresholds: transições (1 e 2) mais finas
