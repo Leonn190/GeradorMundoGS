@@ -1,0 +1,3 @@
+BIOMA_NEVE = 3
+BLOCO_NEVE = 6
+NOME_BIOMA = "Neve"
