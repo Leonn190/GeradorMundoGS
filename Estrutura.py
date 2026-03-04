@@ -11,8 +11,8 @@ from bioma_neve import BIOMA_NEVE, BLOCO_NEVE
 from bioma_planicie import BIOMA_PLANICIE, BLOCO_GRAMA
 
 # Tamanho lógico do mundo em blocos (mundo em loop/toroidal)
-WORLD_WIDTH = 3200
-WORLD_HEIGHT = 3200
+WORLD_WIDTH = 1600
+WORLD_HEIGHT = 1600
 
 # Estrutura de chunks
 CHUNK_SIZE = 32  # blocos por chunk
