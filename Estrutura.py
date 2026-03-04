@@ -1,7 +1,9 @@
 import math
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from bioma_deserto import BIOMA_DESERTO, BLOCO_AREIA_DESERTO
 from bioma_floresta import BIOMA_FLORESTA, BLOCO_GRAMA_ESCURA
@@ -40,11 +42,22 @@ class ChunkCoord:
 
 
 class GeradorMundo:
-    def __init__(self, seed: int = 12345):
+    def __init__(self, seed: int = 12345, worker_threads: int = 2):
         self.seed = int(seed)
         self._height_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
         self._biome_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
         self._block_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
+        self._cache_lock = threading.Lock()
+        self._pending_block_chunks: set[ChunkCoord] = set()
+        self._executor = ThreadPoolExecutor(max_workers=max(1, int(worker_threads)), thread_name_prefix="chunk")
+
+    def _normalize_chunk(self, chunk_x: int, chunk_y: int) -> ChunkCoord:
+        return ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
+
+    def __del__(self) -> None:
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _loop_x(self, x: int) -> int:
         return x % WORLD_WIDTH
@@ -213,9 +226,10 @@ class GeradorMundo:
         return max(counts.items(), key=lambda pair: pair[1])[0]
 
     def get_biome_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
-        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
-        if cc in self._biome_chunk_cache:
-            return self._biome_chunk_cache[cc]
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._biome_chunk_cache:
+                return self._biome_chunk_cache[cc]
 
         start_x = cc.x * CHUNK_SIZE
         start_y = cc.y * CHUNK_SIZE
@@ -226,13 +240,15 @@ class GeradorMundo:
                 row.append(self._biome_value(start_x + local_x, start_y + local_y))
             data.append(row)
 
-        self._biome_chunk_cache[cc] = data
+        with self._cache_lock:
+            self._biome_chunk_cache[cc] = data
         return data
 
     def get_height_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
-        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
-        if cc in self._height_chunk_cache:
-            return self._height_chunk_cache[cc]
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._height_chunk_cache:
+                return self._height_chunk_cache[cc]
 
         biome_chunk = self.get_biome_chunk(cc.x, cc.y)
         start_x = cc.x * CHUNK_SIZE
@@ -248,14 +264,11 @@ class GeradorMundo:
                 row.append(self._height_value(world_x, world_y, biome))
             data.append(row)
 
-        self._height_chunk_cache[cc] = data
+        with self._cache_lock:
+            self._height_chunk_cache[cc] = data
         return data
 
-    def get_block_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
-        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
-        if cc in self._block_chunk_cache:
-            return self._block_chunk_cache[cc]
-
+    def _build_block_chunk_data(self, cc: ChunkCoord) -> list[list[int]]:
         biome_chunk = self.get_biome_chunk(cc.x, cc.y)
         height_chunk = self.get_height_chunk(cc.x, cc.y)
         start_x = cc.x * CHUNK_SIZE
@@ -270,8 +283,48 @@ class GeradorMundo:
                 world_y = start_y + local_y
                 row.append(self._cleanup_isolated_block(world_x, world_y, center_block))
             data.append(row)
+        return data
 
-        self._block_chunk_cache[cc] = data
+    def _generate_block_chunk_async(self, cc: ChunkCoord) -> None:
+        try:
+            data = self._build_block_chunk_data(cc)
+            with self._cache_lock:
+                self._block_chunk_cache[cc] = data
+        finally:
+            with self._cache_lock:
+                self._pending_block_chunks.discard(cc)
+
+    def request_block_chunk(self, chunk_x: int, chunk_y: int) -> None:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._block_chunk_cache or cc in self._pending_block_chunks:
+                return
+            self._pending_block_chunks.add(cc)
+        self._executor.submit(self._generate_block_chunk_async, cc)
+
+    def try_get_block_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]] | None:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            chunk = self._block_chunk_cache.get(cc)
+
+        if chunk is None:
+            self.request_block_chunk(cc.x, cc.y)
+        return chunk
+
+    def pending_chunk_count(self) -> int:
+        with self._cache_lock:
+            return len(self._pending_block_chunks)
+
+    def get_block_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._block_chunk_cache:
+                return self._block_chunk_cache[cc]
+
+        data = self._build_block_chunk_data(cc)
+        with self._cache_lock:
+            self._block_chunk_cache[cc] = data
+            self._pending_block_chunks.discard(cc)
         return data
 
     def get_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
