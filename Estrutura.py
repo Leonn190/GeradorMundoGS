@@ -3,12 +3,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from bioma_deserto import BIOMA_DESERTO, BLOCO_AREIA_DESERTO
 from bioma_floresta import BIOMA_FLORESTA, BLOCO_GRAMA_ESCURA
+from bioma_neve import BIOMA_NEVE, BLOCO_NEVE
 from bioma_planicie import BIOMA_PLANICIE, BLOCO_GRAMA
 
 # Tamanho lógico do mundo em blocos (mundo em loop/toroidal)
-WORLD_WIDTH = 2560
-WORLD_HEIGHT = 2560
+WORLD_WIDTH = 3200
+WORLD_HEIGHT = 3200
 
 # Estrutura de chunks
 CHUNK_SIZE = 32  # blocos por chunk
@@ -26,6 +28,8 @@ BLOCK_COLORS = {
     BLOCO_AGUA_OCEANO: (18, 53, 98),
     BLOCO_AGUA_RASA: (64, 128, 191),
     BLOCO_AREIA_PRAIA: (204, 183, 124),
+    BLOCO_AREIA_DESERTO: (223, 198, 102),
+    BLOCO_NEVE: (236, 244, 255),
 }
 
 
@@ -98,9 +102,16 @@ class GeradorMundo:
         nx = lx / WORLD_WIDTH
         ny = ly / WORLD_HEIGHT
 
-        biome_noise = self._fbm(nx * 5.0 + 73.1, ny * 5.0 - 51.7, octaves=4, lacunarity=2.0, gain=0.52)
-        # Planície predominante
-        return BIOMA_FLORESTA if biome_noise > 0.68 else BIOMA_PLANICIE
+        humidity_noise = self._fbm(nx * 5.0 + 73.1, ny * 5.0 - 51.7, octaves=4, lacunarity=2.0, gain=0.52)
+        temperature_noise = self._fbm(nx * 4.3 - 19.0, ny * 4.3 + 88.2, octaves=4, lacunarity=2.0, gain=0.5)
+
+        if temperature_noise < 0.36:
+            return BIOMA_NEVE
+        if temperature_noise > 0.66 and humidity_noise < 0.50:
+            return BIOMA_DESERTO
+        if humidity_noise > 0.68:
+            return BIOMA_FLORESTA
+        return BIOMA_PLANICIE
 
     def _height_value(self, world_x: int, world_y: int, biome: int) -> int:
         lx = self._loop_x(world_x)
@@ -136,6 +147,12 @@ class GeradorMundo:
         if biome == BIOMA_FLORESTA:
             river_factor = 0.11
             lake_factor = 0.05
+        elif biome == BIOMA_DESERTO:
+            river_factor = 0.07
+            lake_factor = 0.03
+        elif biome == BIOMA_NEVE:
+            river_factor = 0.13
+            lake_factor = 0.06
         else:
             river_factor = 0.18
             lake_factor = 0.10
@@ -153,7 +170,7 @@ class GeradorMundo:
             return 0
         if v < 0.515:
             return 1
-        if v < 0.535:
+        if v < 0.531:
             return 2
         return 3
 
@@ -164,9 +181,36 @@ class GeradorMundo:
             return BLOCO_AGUA_RASA
         if height == 2:
             return BLOCO_AREIA_PRAIA
+        if biome == BIOMA_DESERTO:
+            return BLOCO_AREIA_DESERTO
+        if biome == BIOMA_NEVE:
+            return BLOCO_NEVE
         if biome == BIOMA_FLORESTA:
             return BLOCO_GRAMA_ESCURA
         return BLOCO_GRAMA
+
+    def _raw_block_at(self, world_x: int, world_y: int) -> int:
+        biome = self._biome_value(world_x, world_y)
+        height = self._height_value(world_x, world_y, biome)
+        return self._block_from(height, biome)
+
+    def _cleanup_isolated_block(self, world_x: int, world_y: int, center_block: int) -> int:
+        counts: dict[int, int] = {}
+        same_neighbors = 0
+
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor_block = self._raw_block_at(world_x + dx, world_y + dy)
+                counts[neighbor_block] = counts.get(neighbor_block, 0) + 1
+                if neighbor_block == center_block:
+                    same_neighbors += 1
+
+        if same_neighbors >= 2:
+            return center_block
+
+        return max(counts.items(), key=lambda pair: pair[1])[0]
 
     def get_biome_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
         cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
@@ -214,12 +258,17 @@ class GeradorMundo:
 
         biome_chunk = self.get_biome_chunk(cc.x, cc.y)
         height_chunk = self.get_height_chunk(cc.x, cc.y)
+        start_x = cc.x * CHUNK_SIZE
+        start_y = cc.y * CHUNK_SIZE
         data: list[list[int]] = []
 
         for local_y in range(CHUNK_SIZE):
             row: list[int] = []
             for local_x in range(CHUNK_SIZE):
-                row.append(self._block_from(height_chunk[local_y][local_x], biome_chunk[local_y][local_x]))
+                center_block = self._block_from(height_chunk[local_y][local_x], biome_chunk[local_y][local_x])
+                world_x = start_x + local_x
+                world_y = start_y + local_y
+                row.append(self._cleanup_isolated_block(world_x, world_y, center_block))
             data.append(row)
 
         self._block_chunk_cache[cc] = data
