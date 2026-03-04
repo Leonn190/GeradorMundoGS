@@ -1,8 +1,12 @@
 import math
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from bioma_floresta import BIOMA_FLORESTA, BLOCO_GRAMA_ESCURA
+from bioma_planicie import BIOMA_PLANICIE, BLOCO_GRAMA
 
 # Tamanho lógico do mundo em blocos (mundo em loop/toroidal)
-# +25% em relação ao tamanho anterior (2048)
 WORLD_WIDTH = 2560
 WORLD_HEIGHT = 2560
 
@@ -10,12 +14,18 @@ WORLD_HEIGHT = 2560
 CHUNK_SIZE = 32  # blocos por chunk
 BLOCK_SIZE = 32  # pixels por bloco (zoom padrão)
 
-# Cores base por altura
-HEIGHT_COLORS = {
-    0: (18, 53, 98),    # oceano (água funda escura)
-    1: (64, 128, 191),  # água rasa
-    2: (204, 183, 124), # areia/transição
-    3: (76, 150, 72),   # solo
+# IDs de bloco
+BLOCO_AGUA_OCEANO = 2
+BLOCO_AGUA_RASA = 3
+BLOCO_AREIA_PRAIA = 4
+
+# Cores base por bloco
+BLOCK_COLORS = {
+    BLOCO_GRAMA: (82, 158, 74),
+    BLOCO_GRAMA_ESCURA: (42, 112, 54),
+    BLOCO_AGUA_OCEANO: (18, 53, 98),
+    BLOCO_AGUA_RASA: (64, 128, 191),
+    BLOCO_AREIA_PRAIA: (204, 183, 124),
 }
 
 
@@ -26,19 +36,11 @@ class ChunkCoord:
 
 
 class GeradorMundo:
-    """
-    Gera um mundo 2D em loop usando seed e chunks.
-
-    O mapa base entrega apenas 4 alturas:
-        0 = oceano
-        1 = água rasa
-        2 = areia
-        3 = solo
-    """
-
     def __init__(self, seed: int = 12345):
         self.seed = int(seed)
-        self._chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
+        self._height_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
+        self._biome_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
+        self._block_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
 
     def _loop_x(self, x: int) -> int:
         return x % WORLD_WIDTH
@@ -47,14 +49,12 @@ class GeradorMundo:
         return y % WORLD_HEIGHT
 
     def _hash2d(self, x: int, y: int) -> int:
-        """Hash determinístico 2D rápido para geração procedural sem libs externas."""
         n = x * 374761393 + y * 668265263 + self.seed * 1442695040888963407
         n = (n ^ (n >> 13)) * 1274126177
         n = n ^ (n >> 16)
         return n & 0xFFFFFFFF
 
     def _value_noise(self, x: float, y: float) -> float:
-        """Value noise contínuo via interpolação bilinear de hashes de grade."""
         x0 = math.floor(x)
         y0 = math.floor(y)
         x1 = x0 + 1
@@ -71,7 +71,6 @@ class GeradorMundo:
         n01 = rand01(x0, y1)
         n11 = rand01(x1, y1)
 
-        # smoothstep para transição suave
         sx_s = sx * sx * (3.0 - 2.0 * sx)
         sy_s = sy * sy * (3.0 - 2.0 * sy)
 
@@ -93,33 +92,29 @@ class GeradorMundo:
 
         return value / norm if norm else 0.0
 
-    def _height_value(self, world_x: int, world_y: int) -> int:
-        """
-        Calcula altura discreta [0..3] com tendência continental + hidrologia leve.
-
-        Objetivo visual:
-        - maior parte do mapa em oceano (0) e solo (3)
-        - água rasa (1) e praia (2) apenas como transições finas
-        - presença de lagos e rios rasos
-        """
+    def _biome_value(self, world_x: int, world_y: int) -> int:
         lx = self._loop_x(world_x)
         ly = self._loop_y(world_y)
-
-        # coordenadas normalizadas [0,1]
         nx = lx / WORLD_WIDTH
         ny = ly / WORLD_HEIGHT
 
-        # dobra para formato toroidal mais contínuo visualmente
+        biome_noise = self._fbm(nx * 5.0 + 73.1, ny * 5.0 - 51.7, octaves=4, lacunarity=2.0, gain=0.52)
+        # Planície predominante
+        return BIOMA_FLORESTA if biome_noise > 0.68 else BIOMA_PLANICIE
+
+    def _height_value(self, world_x: int, world_y: int, biome: int) -> int:
+        lx = self._loop_x(world_x)
+        ly = self._loop_y(world_y)
+
+        nx = lx / WORLD_WIDTH
+        ny = ly / WORLD_HEIGHT
+
         tx = 0.5 - abs(nx - 0.5)
         ty = 0.5 - abs(ny - 0.5)
 
-        # massa continental larga
         continent = self._fbm(tx * 3.0, ty * 3.0, octaves=5, lacunarity=2.0, gain=0.55)
-
-        # detalhe de costa, baías e recortes
         coast_detail = self._fbm(nx * 14.0, ny * 14.0, octaves=4, lacunarity=2.2, gain=0.5)
 
-        # "correntes" suaves para gerar orlas mais orgânicas
         wave = (
             math.sin((nx * 2.0 + coast_detail * 0.8) * math.tau)
             + math.cos((ny * 1.6 - continent * 0.7) * math.tau)
@@ -127,23 +122,26 @@ class GeradorMundo:
 
         v = 0.70 * continent + 0.23 * coast_detail + wave
 
-        # rios: máscara baseada em "faixas" de ruído
-        # abs(noise - 0.5) pequeno => no canal do rio
-        river_noise = self._fbm(nx * 42.0 + 11.7, ny * 42.0 - 3.1, octaves=3, lacunarity=2.1, gain=0.52)
+        river_noise = self._fbm(nx * 24.0 + 11.7, ny * 24.0 - 3.1, octaves=3, lacunarity=2.1, gain=0.52)
         river_band = abs(river_noise - 0.5)
-        # faixa mais larga para rios mais grossos visualmente
-        river_strength = max(0.0, 1.0 - (river_band / 0.042))
+        # rios mais grossos, porém menos frequentes no geral
+        river_strength = max(0.0, 1.0 - (river_band / 0.052))
+        river_strength = max(0.0, river_strength - 0.20)
 
-        # lagos: bacias esparsas em área continental
         lake_noise = self._fbm(nx * 8.5 - 19.4, ny * 8.5 + 7.9, octaves=4, lacunarity=2.0, gain=0.5)
-        lake_strength = max(0.0, (0.42 - lake_noise) / 0.08)
+        lake_strength = max(0.0, (0.39 - lake_noise) / 0.07)
 
-        # rios e lagos atuam principalmente sobre terreno emergido
         land_factor = max(0.0, min(1.0, (v - 0.53) / 0.16))
-        water_cut = 0.25 * river_strength * land_factor + 0.13 * lake_strength * land_factor
 
-        # borda oceânica: força oceano puro nas extremidades de forma suave,
-        # evitando costura aparente quando o mundo "dá a volta".
+        if biome == BIOMA_FLORESTA:
+            river_factor = 0.11
+            lake_factor = 0.05
+        else:
+            river_factor = 0.18
+            lake_factor = 0.10
+
+        water_cut = river_factor * river_strength * land_factor + lake_factor * lake_strength * land_factor
+
         edge_dist = min(nx, 1.0 - nx, ny, 1.0 - ny)
         coast_band = 0.12
         edge_factor = max(0.0, min(1.0, (coast_band - edge_dist) / coast_band))
@@ -151,7 +149,6 @@ class GeradorMundo:
         water_cut += 0.42 * edge_factor
         v -= water_cut
 
-        # thresholds: transições (1 e 2) mais finas
         if v < 0.49:
             return 0
         if v < 0.515:
@@ -160,11 +157,40 @@ class GeradorMundo:
             return 2
         return 3
 
-    def get_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
-        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
-        if cc in self._chunk_cache:
-            return self._chunk_cache[cc]
+    def _block_from(self, height: int, biome: int) -> int:
+        if height == 0:
+            return BLOCO_AGUA_OCEANO
+        if height == 1:
+            return BLOCO_AGUA_RASA
+        if height == 2:
+            return BLOCO_AREIA_PRAIA
+        if biome == BIOMA_FLORESTA:
+            return BLOCO_GRAMA_ESCURA
+        return BLOCO_GRAMA
 
+    def get_biome_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
+        if cc in self._biome_chunk_cache:
+            return self._biome_chunk_cache[cc]
+
+        start_x = cc.x * CHUNK_SIZE
+        start_y = cc.y * CHUNK_SIZE
+        data: list[list[int]] = []
+        for local_y in range(CHUNK_SIZE):
+            row: list[int] = []
+            for local_x in range(CHUNK_SIZE):
+                row.append(self._biome_value(start_x + local_x, start_y + local_y))
+            data.append(row)
+
+        self._biome_chunk_cache[cc] = data
+        return data
+
+    def get_height_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
+        if cc in self._height_chunk_cache:
+            return self._height_chunk_cache[cc]
+
+        biome_chunk = self.get_biome_chunk(cc.x, cc.y)
         start_x = cc.x * CHUNK_SIZE
         start_y = cc.y * CHUNK_SIZE
 
@@ -172,13 +198,35 @@ class GeradorMundo:
         for local_y in range(CHUNK_SIZE):
             row: list[int] = []
             for local_x in range(CHUNK_SIZE):
+                biome = biome_chunk[local_y][local_x]
                 world_x = start_x + local_x
                 world_y = start_y + local_y
-                row.append(self._height_value(world_x, world_y))
+                row.append(self._height_value(world_x, world_y, biome))
             data.append(row)
 
-        self._chunk_cache[cc] = data
+        self._height_chunk_cache[cc] = data
         return data
+
+    def get_block_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        cc = ChunkCoord(chunk_x % (WORLD_WIDTH // CHUNK_SIZE), chunk_y % (WORLD_HEIGHT // CHUNK_SIZE))
+        if cc in self._block_chunk_cache:
+            return self._block_chunk_cache[cc]
+
+        biome_chunk = self.get_biome_chunk(cc.x, cc.y)
+        height_chunk = self.get_height_chunk(cc.x, cc.y)
+        data: list[list[int]] = []
+
+        for local_y in range(CHUNK_SIZE):
+            row: list[int] = []
+            for local_x in range(CHUNK_SIZE):
+                row.append(self._block_from(height_chunk[local_y][local_x], biome_chunk[local_y][local_x]))
+            data.append(row)
+
+        self._block_chunk_cache[cc] = data
+        return data
+
+    def get_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        return self.get_height_chunk(chunk_x, chunk_y)
 
     def get_height(self, world_x: int, world_y: int) -> int:
         lx = self._loop_x(world_x)
@@ -187,4 +235,46 @@ class GeradorMundo:
         chunk_y = ly // CHUNK_SIZE
         local_x = lx % CHUNK_SIZE
         local_y = ly % CHUNK_SIZE
-        return self.get_chunk(chunk_x, chunk_y)[local_y][local_x]
+        return self.get_height_chunk(chunk_x, chunk_y)[local_y][local_x]
+
+    def get_biome(self, world_x: int, world_y: int) -> int:
+        lx = self._loop_x(world_x)
+        ly = self._loop_y(world_y)
+        chunk_x = lx // CHUNK_SIZE
+        chunk_y = ly // CHUNK_SIZE
+        local_x = lx % CHUNK_SIZE
+        local_y = ly % CHUNK_SIZE
+        return self.get_biome_chunk(chunk_x, chunk_y)[local_y][local_x]
+
+    def get_block(self, world_x: int, world_y: int) -> int:
+        lx = self._loop_x(world_x)
+        ly = self._loop_y(world_y)
+        chunk_x = lx // CHUNK_SIZE
+        chunk_y = ly // CHUNK_SIZE
+        local_x = lx % CHUNK_SIZE
+        local_y = ly % CHUNK_SIZE
+        return self.get_block_chunk(chunk_x, chunk_y)[local_y][local_x]
+
+
+def salvar_foto_mundo(seed: int = 202604) -> Path:
+    gerador = GeradorMundo(seed=seed)
+    pasta_saida = Path("fotos_mapa")
+    pasta_saida.mkdir(exist_ok=True)
+    nome_arquivo = f"mapa_seed_{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ppm"
+    caminho_saida = pasta_saida / nome_arquivo
+
+    with caminho_saida.open("wb") as arquivo:
+        arquivo.write(f"P6\n{WORLD_WIDTH} {WORLD_HEIGHT}\n255\n".encode("ascii"))
+        for world_y in range(WORLD_HEIGHT):
+            linha = bytearray()
+            for world_x in range(WORLD_WIDTH):
+                bloco = gerador.get_block(world_x, world_y)
+                linha.extend(BLOCK_COLORS[bloco])
+            arquivo.write(linha)
+
+    return caminho_saida
+
+
+if __name__ == "__main__":
+    caminho = salvar_foto_mundo()
+    print(f"Foto do mundo salva em: {caminho}")
