@@ -5,11 +5,6 @@ from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from bioma_deserto import BIOMA_DESERTO, BLOCO_AREIA_DESERTO
-from bioma_floresta import BIOMA_FLORESTA, BLOCO_GRAMA_ESCURA
-from bioma_neve import BIOMA_NEVE, BLOCO_NEVE
-from bioma_planicie import BIOMA_PLANICIE, BLOCO_GRAMA
-
 # Tamanho lógico do mundo em blocos (mundo em loop/toroidal)
 WORLD_WIDTH = 3200
 WORLD_HEIGHT = 3200
@@ -18,10 +13,33 @@ WORLD_HEIGHT = 3200
 CHUNK_SIZE = 32  # blocos por chunk
 BLOCK_SIZE = 32  # pixels por bloco (zoom padrão)
 
+# Biomas centralizados (sem arquivos separados)
+BIOMAS = {
+    "planicie": {"id": 0, "nome": "Planicie"},
+    "floresta": {"id": 1, "nome": "Floresta"},
+    "deserto": {"id": 2, "nome": "Deserto"},
+    "neve": {"id": 3, "nome": "Neve"},
+    "vulcanico": {"id": 4, "nome": "Vulcanico"},
+    "magico": {"id": 5, "nome": "Magico"},
+}
+
+BIOMA_PLANICIE = BIOMAS["planicie"]["id"]
+BIOMA_FLORESTA = BIOMAS["floresta"]["id"]
+BIOMA_DESERTO = BIOMAS["deserto"]["id"]
+BIOMA_NEVE = BIOMAS["neve"]["id"]
+BIOMA_VULCANICO = BIOMAS["vulcanico"]["id"]
+BIOMA_MAGICO = BIOMAS["magico"]["id"]
+
 # IDs de bloco
+BLOCO_GRAMA = 0
+BLOCO_GRAMA_ESCURA = 1
 BLOCO_AGUA_OCEANO = 2
 BLOCO_AGUA_RASA = 3
 BLOCO_AREIA_PRAIA = 4
+BLOCO_AREIA_DESERTO = 5
+BLOCO_NEVE = 6
+BLOCO_PEDRA_VULCANICA_MARROM = 7
+BLOCO_MATO_MAGICO_ROXO = 8
 
 # Cores base por bloco
 BLOCK_COLORS = {
@@ -32,7 +50,29 @@ BLOCK_COLORS = {
     BLOCO_AREIA_PRAIA: (204, 183, 124),
     BLOCO_AREIA_DESERTO: (223, 198, 102),
     BLOCO_NEVE: (236, 244, 255),
+    BLOCO_PEDRA_VULCANICA_MARROM: (101, 64, 38),
+    BLOCO_MATO_MAGICO_ROXO: (138, 88, 188),
 }
+
+# Objetos naturais com raridade, separação mínima e restrição de bioma
+OBJETOS_NATURAIS = {
+    "nada": {"id": 0, "raridade": 0.66, "separacao_minima": 0, "biomas": "todos"},
+    "arvore": {"id": 1, "raridade": 0.08, "separacao_minima": 2, "biomas": ["planicie", "floresta", "magico"]},
+    "pedra": {"id": 2, "raridade": 0.08, "separacao_minima": 1, "biomas": "todos"},
+    "arbusto": {"id": 3, "raridade": 0.06, "separacao_minima": 1, "biomas": ["planicie", "floresta", "deserto", "magico"]},
+    "ouro": {"id": 4, "raridade": 0.015, "separacao_minima": 3, "biomas": "todos"},
+    "ametista": {"id": 5, "raridade": 0.010, "separacao_minima": 4, "biomas": ["magico"]},
+    "diamante": {"id": 6, "raridade": 0.010, "separacao_minima": 4, "biomas": ["neve"]},
+    "rubi": {"id": 7, "raridade": 0.010, "separacao_minima": 4, "biomas": ["vulcanico"]},
+    "esmeralda": {"id": 8, "raridade": 0.010, "separacao_minima": 4, "biomas": ["deserto"]},
+    "palmeira": {"id": 9, "raridade": 0.025, "separacao_minima": 3, "biomas": ["deserto"]},
+    "pinheiro": {"id": 10, "raridade": 0.025, "separacao_minima": 3, "biomas": ["neve"]},
+    "cobre": {"id": 11, "raridade": 0.020, "separacao_minima": 2, "biomas": "todos"},
+    "poca_de_lava": {"id": 12, "raridade": 0.015, "separacao_minima": 5, "biomas": ["vulcanico"]},
+}
+
+NOME_OBJETO_POR_ID = {dados["id"]: nome for nome, dados in OBJETOS_NATURAIS.items()}
+NOME_BIOMA_POR_ID = {dados["id"]: nome for nome, dados in BIOMAS.items()}
 
 
 @dataclass(frozen=True)
@@ -47,8 +87,10 @@ class GeradorMundo:
         self._height_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
         self._biome_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
         self._block_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
+        self._object_chunk_cache: dict[ChunkCoord, list[list[int]]] = {}
         self._cache_lock = threading.Lock()
         self._pending_block_chunks: set[ChunkCoord] = set()
+        self._pending_object_chunks: set[ChunkCoord] = set()
         self._executor = ThreadPoolExecutor(max_workers=max(1, int(worker_threads)), thread_name_prefix="chunk")
 
     def _normalize_chunk(self, chunk_x: int, chunk_y: int) -> ChunkCoord:
@@ -65,13 +107,13 @@ class GeradorMundo:
     def _loop_y(self, y: int) -> int:
         return y % WORLD_HEIGHT
 
-    def _hash2d(self, x: int, y: int) -> int:
-        n = x * 374761393 + y * 668265263 + self.seed * 1442695040888963407
+    def _hash2d(self, x: int, y: int, salt: int = 0) -> int:
+        n = x * 374761393 + y * 668265263 + self.seed * 1442695040888963407 + salt * 1013904223
         n = (n ^ (n >> 13)) * 1274126177
         n = n ^ (n >> 16)
         return n & 0xFFFFFFFF
 
-    def _value_noise(self, x: float, y: float) -> float:
+    def _value_noise(self, x: float, y: float, salt: int = 0) -> float:
         x0 = math.floor(x)
         y0 = math.floor(y)
         x1 = x0 + 1
@@ -81,7 +123,7 @@ class GeradorMundo:
         sy = y - y0
 
         def rand01(ix: int, iy: int) -> float:
-            return self._hash2d(ix, iy) / 0xFFFFFFFF
+            return self._hash2d(ix, iy, salt=salt) / 0xFFFFFFFF
 
         n00 = rand01(x0, y0)
         n10 = rand01(x1, y0)
@@ -95,14 +137,14 @@ class GeradorMundo:
         ix1 = n01 + (n11 - n01) * sx_s
         return ix0 + (ix1 - ix0) * sy_s
 
-    def _fbm(self, x: float, y: float, octaves: int, lacunarity: float, gain: float) -> float:
+    def _fbm(self, x: float, y: float, octaves: int, lacunarity: float, gain: float, salt: int = 0) -> float:
         value = 0.0
         amplitude = 1.0
         frequency = 1.0
         norm = 0.0
 
         for _ in range(octaves):
-            value += self._value_noise(x * frequency, y * frequency) * amplitude
+            value += self._value_noise(x * frequency, y * frequency, salt=salt) * amplitude
             norm += amplitude
             amplitude *= gain
             frequency *= lacunarity
@@ -117,6 +159,14 @@ class GeradorMundo:
 
         humidity_noise = self._fbm(nx * 5.0 + 73.1, ny * 5.0 - 51.7, octaves=4, lacunarity=2.0, gain=0.52)
         temperature_noise = self._fbm(nx * 4.3 - 19.0, ny * 4.3 + 88.2, octaves=4, lacunarity=2.0, gain=0.5)
+        volcanic_noise = self._fbm(nx * 13.0 + 14.5, ny * 13.0 - 34.0, octaves=3, lacunarity=2.1, gain=0.48, salt=31)
+        magic_noise = self._fbm(nx * 12.0 - 99.0, ny * 12.0 + 3.0, octaves=3, lacunarity=2.1, gain=0.48, salt=67)
+
+        # biomas raros e pequenos
+        if volcanic_noise > 0.83 and temperature_noise > 0.58:
+            return BIOMA_VULCANICO
+        if magic_noise > 0.84 and humidity_noise > 0.56:
+            return BIOMA_MAGICO
 
         if temperature_noise < 0.36:
             return BIOMA_NEVE
@@ -148,7 +198,6 @@ class GeradorMundo:
 
         river_noise = self._fbm(nx * 24.0 + 11.7, ny * 24.0 - 3.1, octaves=3, lacunarity=2.1, gain=0.52)
         river_band = abs(river_noise - 0.5)
-        # rios mais grossos, porém menos frequentes no geral
         river_strength = max(0.0, 1.0 - (river_band / 0.052))
         river_strength = max(0.0, river_strength - 0.20)
 
@@ -158,17 +207,17 @@ class GeradorMundo:
         land_factor = max(0.0, min(1.0, (v - 0.53) / 0.16))
 
         if biome == BIOMA_FLORESTA:
-            river_factor = 0.11
-            lake_factor = 0.05
+            river_factor, lake_factor = 0.11, 0.05
         elif biome == BIOMA_DESERTO:
-            river_factor = 0.07
-            lake_factor = 0.03
+            river_factor, lake_factor = 0.07, 0.03
         elif biome == BIOMA_NEVE:
-            river_factor = 0.13
-            lake_factor = 0.06
+            river_factor, lake_factor = 0.13, 0.06
+        elif biome == BIOMA_VULCANICO:
+            river_factor, lake_factor = 0.04, 0.02
+        elif biome == BIOMA_MAGICO:
+            river_factor, lake_factor = 0.12, 0.08
         else:
-            river_factor = 0.18
-            lake_factor = 0.10
+            river_factor, lake_factor = 0.18, 0.10
 
         water_cut = river_factor * river_strength * land_factor + lake_factor * lake_strength * land_factor
 
@@ -200,6 +249,10 @@ class GeradorMundo:
             return BLOCO_NEVE
         if biome == BIOMA_FLORESTA:
             return BLOCO_GRAMA_ESCURA
+        if biome == BIOMA_VULCANICO:
+            return BLOCO_PEDRA_VULCANICA_MARROM
+        if biome == BIOMA_MAGICO:
+            return BLOCO_MATO_MAGICO_ROXO
         return BLOCO_GRAMA
 
     def _raw_block_at(self, world_x: int, world_y: int) -> int:
@@ -222,8 +275,60 @@ class GeradorMundo:
 
         if same_neighbors >= 2:
             return center_block
-
         return max(counts.items(), key=lambda pair: pair[1])[0]
+
+    def _biome_name(self, biome_id: int) -> str:
+        return NOME_BIOMA_POR_ID.get(biome_id, "planicie")
+
+    def _objeto_permitido_no_bioma(self, objeto_nome: str, biome_name: str) -> bool:
+        biomas = OBJETOS_NATURAIS[objeto_nome]["biomas"]
+        return biomas == "todos" or biome_name in biomas
+
+    def _escolher_objeto_base(self, world_x: int, world_y: int, biome_name: str) -> tuple[str, int]:
+        valor = self._hash2d(world_x, world_y, salt=911) / 0xFFFFFFFF
+        cumulativo = 0.0
+        candidatos = []
+        for nome, dados in OBJETOS_NATURAIS.items():
+            if nome == "nada":
+                continue
+            if self._objeto_permitido_no_bioma(nome, biome_name):
+                candidatos.append((nome, dados))
+
+        candidatos.sort(key=lambda item: item[1]["id"])
+
+        for nome, dados in candidatos:
+            cumulativo += dados["raridade"]
+            if valor <= cumulativo:
+                return nome, dados["id"]
+        return "nada", OBJETOS_NATURAIS["nada"]["id"]
+
+    def _respeita_separacao_objeto(self, world_x: int, world_y: int, objeto_nome: str, objeto_id: int, biome_name: str) -> bool:
+        separacao = OBJETOS_NATURAIS[objeto_nome]["separacao_minima"]
+        if separacao <= 0:
+            return True
+
+        for dy in range(-separacao, separacao + 1):
+            for dx in range(-separacao, separacao + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                if max(abs(dx), abs(dy)) > separacao:
+                    continue
+                nx = self._loop_x(world_x + dx)
+                ny = self._loop_y(world_y + dy)
+                vizinho_bioma_nome = self._biome_name(self._biome_value(nx, ny))
+                _, vizinho_id = self._escolher_objeto_base(nx, ny, vizinho_bioma_nome)
+                if vizinho_id == objeto_id:
+                    return False
+        return True
+
+    def _object_at(self, world_x: int, world_y: int) -> int:
+        biome_name = self._biome_name(self._biome_value(world_x, world_y))
+        objeto_nome, objeto_id = self._escolher_objeto_base(world_x, world_y, biome_name)
+        if objeto_nome == "nada":
+            return objeto_id
+        if self._respeita_separacao_objeto(world_x, world_y, objeto_nome, objeto_id, biome_name):
+            return objeto_id
+        return OBJETOS_NATURAIS["nada"]["id"]
 
     def get_biome_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
         cc = self._normalize_chunk(chunk_x, chunk_y)
@@ -285,6 +390,17 @@ class GeradorMundo:
             data.append(row)
         return data
 
+    def _build_object_chunk_data(self, cc: ChunkCoord) -> list[list[int]]:
+        start_x = cc.x * CHUNK_SIZE
+        start_y = cc.y * CHUNK_SIZE
+        data: list[list[int]] = []
+        for local_y in range(CHUNK_SIZE):
+            row: list[int] = []
+            for local_x in range(CHUNK_SIZE):
+                row.append(self._object_at(start_x + local_x, start_y + local_y))
+            data.append(row)
+        return data
+
     def _generate_block_chunk_async(self, cc: ChunkCoord) -> None:
         try:
             data = self._build_block_chunk_data(cc)
@@ -294,6 +410,15 @@ class GeradorMundo:
             with self._cache_lock:
                 self._pending_block_chunks.discard(cc)
 
+    def _generate_object_chunk_async(self, cc: ChunkCoord) -> None:
+        try:
+            data = self._build_object_chunk_data(cc)
+            with self._cache_lock:
+                self._object_chunk_cache[cc] = data
+        finally:
+            with self._cache_lock:
+                self._pending_object_chunks.discard(cc)
+
     def request_block_chunk(self, chunk_x: int, chunk_y: int) -> None:
         cc = self._normalize_chunk(chunk_x, chunk_y)
         with self._cache_lock:
@@ -302,6 +427,14 @@ class GeradorMundo:
             self._pending_block_chunks.add(cc)
         self._executor.submit(self._generate_block_chunk_async, cc)
 
+    def request_object_chunk(self, chunk_x: int, chunk_y: int) -> None:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._object_chunk_cache or cc in self._pending_object_chunks:
+                return
+            self._pending_object_chunks.add(cc)
+        self._executor.submit(self._generate_object_chunk_async, cc)
+
     def try_get_block_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]] | None:
         cc = self._normalize_chunk(chunk_x, chunk_y)
         with self._cache_lock:
@@ -309,6 +442,15 @@ class GeradorMundo:
 
         if chunk is None:
             self.request_block_chunk(cc.x, cc.y)
+        return chunk
+
+    def try_get_object_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]] | None:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            chunk = self._object_chunk_cache.get(cc)
+
+        if chunk is None:
+            self.request_object_chunk(cc.x, cc.y)
         return chunk
 
     def pending_chunk_count(self) -> int:
@@ -325,6 +467,18 @@ class GeradorMundo:
         with self._cache_lock:
             self._block_chunk_cache[cc] = data
             self._pending_block_chunks.discard(cc)
+        return data
+
+    def get_object_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
+        cc = self._normalize_chunk(chunk_x, chunk_y)
+        with self._cache_lock:
+            if cc in self._object_chunk_cache:
+                return self._object_chunk_cache[cc]
+
+        data = self._build_object_chunk_data(cc)
+        with self._cache_lock:
+            self._object_chunk_cache[cc] = data
+            self._pending_object_chunks.discard(cc)
         return data
 
     def get_chunk(self, chunk_x: int, chunk_y: int) -> list[list[int]]:
@@ -356,6 +510,15 @@ class GeradorMundo:
         local_x = lx % CHUNK_SIZE
         local_y = ly % CHUNK_SIZE
         return self.get_block_chunk(chunk_x, chunk_y)[local_y][local_x]
+
+    def get_object(self, world_x: int, world_y: int) -> int:
+        lx = self._loop_x(world_x)
+        ly = self._loop_y(world_y)
+        chunk_x = lx // CHUNK_SIZE
+        chunk_y = ly // CHUNK_SIZE
+        local_x = lx % CHUNK_SIZE
+        local_y = ly % CHUNK_SIZE
+        return self.get_object_chunk(chunk_x, chunk_y)[local_y][local_x]
 
 
 def salvar_foto_mundo(seed: int = 202604) -> Path:
