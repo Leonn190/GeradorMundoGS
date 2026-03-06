@@ -1,3 +1,0 @@
-BIOMA_PLANICIE = 0
-BLOCO_GRAMA = 0
-NOME_BIOMA = "Planicie"
